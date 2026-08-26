@@ -6,151 +6,106 @@ class ReActAgent:
     def __init__(
             self,
             llm: Callable[[list[dict]], str],
-            tools: dict[str, Callable],
+            tools: list[str],
             max_steps: int = 5,
     ):
         self.llm = llm
         self.tools = tools
         self.max_steps = max_steps
 
-    def _build_system_prompt(self) -> str:
-        tool_names = ", ".join(self.tools.keys())
-
+    def build_system_prompt(self) -> str:
         return f"""
-你是一个 ReAct Agent。
+你是一个ReaAct Agent,
 
-可用工具：{tool_names}
+当前可用工具及工具描述:
+{AVAILABLE_TOOLS}
 
-请严格按照以下格式输出：
+回答时，必须严格遵循下面格式中的一种进行回答:
 
+格式1(需要执行工具时):
 Thought: 思考过程
-Action: 工具名称 或 Finish
-Action Input: 工具输入
+Action: 需要的工具名称
+Action Input: 工具的输入参数
 
-如果已经得到最终答案：
-
-Thought: 已经得到答案
+格式2(已经得到最终答案时):
 Action: Finish
-Action Input: 最终答案
+Action Input: 最终结果
+"""
 
-注意：
-1. Action 必须是工具名称或者 Finish。
-2. 如果需要工具，调用工具获取 Observation。
-3. 获取 Observation 后继续思考。
-""".strip()
-
-    def parse(self, text: str) -> dict[str, str]:
-        """解析 Thought、Action、Action Input"""
-
+    def parse_response(self, response: str) -> dict:
         result = {
             "thought": "",
             "action": "",
-            "inp": "",
+            "action_input": "",
         }
 
-        thought = re.search(
-            r"Thought:\s*(.*?)(?=\nAction:)",
-            text,
-            re.DOTALL,
-        )
-
-        action = re.search(
-            r"Action:\s*(.*?)(?=\nAction Input:)",
-            text,
-            re.DOTALL,
-        )
-
-        action_input = re.search(
-            r"Action Input:\s*(.*)",
-            text,
-            re.DOTALL,
-        )
+        thought = re.search(r"Thought:\s*(.*?)(?=\nAction:)", response, re.DOTALL)
+        action = re.search(r"Action:\s*(.*?)(?=\nAction Input:)", response, re.DOTALL)
+        action_input = re.search(r"Action Input:\s*(.*)", response, re.DOTALL)
 
         if thought:
             result["thought"] = thought.group(1).strip()
-
         if action:
             result["action"] = action.group(1).strip()
-
         if action_input:
-            result["inp"] = action_input.group(1).strip()
+            result["action_input"] = action_input.group(1).strip()
 
         return result
 
     def run(self, question: str) -> str:
-        messages = [
-            {
-                "role": "system",
-                "content": self._build_system_prompt(),
-            },
-            {
-                "role": "user",
-                "content": question,
-            },
+        messages: list[dict] = [
+            {"role": "system", "content": self.build_system_prompt()},
+            {"role": "user", "content": question},
         ]
-
-        for _ in range(self.max_steps):
-            print(messages)
-
-            # 1. LLM 思考
+        for step in range(self.max_steps):
             response = self.llm(messages)
 
-            # 2. 解析
-            result = self.parse(response)
+            print(f"Step {step + 1}:\n", response)
+            out = self.parse_response(response)
 
-            action = result["action"]
-            action_input = result["inp"]
+            action = out["action"]
+            action_input = out["action_input"]
 
-            # 3. 判断是否结束
             if action == "Finish":
                 return action_input
 
-            # 4. 调用工具
             if action not in self.tools:
-                observation = f"UnknownToolError: {action}"
+                observation = f"Tool {action} is not available."
             else:
                 try:
-                    observation = self.tools[action](action_input)
+                    observation = action(action_input)
                 except Exception as e:
-                    observation = f"ToolError: {e}"
-
-            # 5. 将 Thought + Action 写回上下文
-            messages.append({
-                "role": "assistant",
-                "content": response,
-            })
-
-            messages.append({
-                "role": "tool",
-                "content": f"Observation: {observation}",
-            })
-
-        return "Reach max steps, quit loop"
+                    observation = f"Exception: {e}"
+            messages.extend([
+                {"role": "assistant", "content": response},
+                {"role": "tool", "content": f"Observation:{observation}"},
+            ])
+        return "Reach Max Steps."
 
 
-# mock llm
-def mock_llm(messages: list[dict]) -> str:
-    # 已经执行过工具
-    if messages[-1]["content"].startswith("Observation:"):
-        return """
-Thought: 已经获得计算结果，可以返回最终答案
-Action: Finish
-Action Input: result is 65
-"""
-
-    # 第一轮
-    return """
-Thought: 需要计算 20 * 3 + 5
-Action: calculator
-Action Input: 20*3+5
-"""
-
-
-def cal(expression: str):
+def calculator(expression: str) -> str:
     return str(eval(expression))
 
 
+def mock_llm(messages: list[dict]) -> str:
+    if "Observation" in messages[-1]["content"]:
+        return f"""
+Thought:已经获取到最终答案
+Action: Finish
+Action Input: 20 * 3 + 5 = 65
+"""
+    else:
+        return f"""
+Thought: 计算20 * 3 + 5，需要调用工具 [calculator]
+Action: calculator
+Action Input: 20 * 3 + 5
+"""
+
+
 if __name__ == "__main__":
-    agent = ReActAgent(llm=mock_llm, tools={"calculator": cal})
-    res = agent.run("calculate 20 * 3 + 5")
+    AVAILABLE_TOOLS: dict[str, str] = {
+        "calculator": "用于进行计算操作的工具"
+    }
+    agent = ReActAgent(llm=mock_llm, tools=list(AVAILABLE_TOOLS.keys()))
+    res = agent.run(question="20 * 3 + 5 的结果是多少?")
     print(res)
